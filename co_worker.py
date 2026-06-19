@@ -92,6 +92,9 @@ def save_user_styles():
 def save_contacts():
     write_json(contacts_path, contacts)
 
+def save_tracked_stats():
+    write_json(os.path.join(MEMORY_DIR, "tracked_stats.json"), tracked_stats)
+
 def get_profile(user_id):
     uid = str(user_id)
     if uid not in ltm_cache:
@@ -268,11 +271,14 @@ boss_online = True  # starts True, flips to False after 3min idle
 boss_last_active = 0  # timestamp of last outgoing message
 boss_sleeping = False  # boss told bot to sleep — no auto-replies
 away_message = ""  # custom away message to reply with when sleeping
-tracked_stats = {
+tracked_stats = read_json(os.path.join(MEMORY_DIR, "tracked_stats.json"), {
     "online_count": 0, "offline_count": 0, "msg_count": 0,
-    "groups_seen": set(), "last_online": None, "first_seen": datetime.now(),
+    "groups_seen": [], "last_online": None, "first_seen": datetime.now().isoformat(),
     "last_profile_name": None, "last_profile_username": None, "event_buffer": []
-}
+})
+tracked_stats.setdefault("groups_seen", [])
+tracked_stats["first_seen"] = tracked_stats.get("first_seen") or datetime.now().isoformat()
+tracked_stats["event_buffer"] = tracked_stats.get("event_buffer", [])
 
 async def resolve_tracked_user(client, me):
     global tracked_user_obj, tracked_user_id
@@ -316,8 +322,10 @@ async def setup_tracking(client, me):
                 tracked_stats["online_count"] += 1
                 tracked_stats["last_online"] = datetime.now()
                 tracked_stats["event_buffer"].append(f"Online #{tracked_stats['online_count']}")
+                save_tracked_stats()
             elif isinstance(s, UserStatusOffline):
                 tracked_stats["event_buffer"].append("Offline")
+                save_tracked_stats()
 
     @client.on(events.NewMessage)
     async def profile_check(event):
@@ -328,6 +336,7 @@ async def setup_tracking(client, me):
                 if u.first_name != tracked_stats["last_profile_name"]:
                     tracked_stats["event_buffer"].append(f"Name changed: {tracked_stats['last_profile_name']} -> {u.first_name}")
                     tracked_stats["last_profile_name"] = u.first_name
+                    save_tracked_stats()
             except: pass
 
     await check_gifts(client, me)
@@ -337,6 +346,7 @@ async def setup_tracking(client, me):
         while True:
             await asyncio.sleep(3600)
             if datetime.now().hour == 23:
+                save_tracked_stats()
                 await client.send_message(me.id,
                     f"Daily for {n}: online {tracked_stats['online_count']}x, "
                     f"msgs {tracked_stats['msg_count']}, groups {len(tracked_stats['groups_seen'])}")
@@ -445,7 +455,9 @@ async def handle_group_message(event, client, me, text, chat):
 
     if not is_mentioned and not is_reply_to_me:
         if tracked_user_id and sender.id == tracked_user_id:
-            tracked_stats["groups_seen"].add(chat.title or "?")
+            t = chat.title or "?"
+            if t not in tracked_stats["groups_seen"]:
+                tracked_stats["groups_seen"].append(t)
             tracked_stats["event_buffer"].append(f"[{chat.title}]: {text[:100]}")
         return
 
@@ -551,8 +563,13 @@ Reply JSON: {{"reasoning":"...","tool":"reply_text","arguments":{{"text":"..."}}
 # ─── BOSS CHAT ───
 def extract_name_from_question(text):
     """Extract person name from questions like 'X kim?', 'who is X?', 'X кто такой?' etc."""
-    t = text.strip().lower()
-    # Patterns: "X kim?", "X кто?", "X qayerdan?", "who is X?", "кто такой X?"
+    t = text.strip()
+    # Handle @username patterns first
+    at_match = re.search(r'@(\w+)', t)
+    if at_match:
+        return at_match.group(0)  # Return @username as-is
+    
+    t_lower = t.lower()
     patterns = [
         (r'^(.+?)\s+kim\??$', 1),          # "Dinara kim?"
         (r'^(.+?)\s+кто\??$', 1),           # "Динара кто?"
@@ -565,13 +582,14 @@ def extract_name_from_question(text):
         (r'^(.+?)\s+откуда\??$', 1),         # "Dinara откуда?"
         (r'^(.+?)\s+nima\??$', 1),           # "Dinara nima?"
         (r'^(.+?)\s+что\??$', 1),            # "Dinara что?"
+        (r'^(.+?)\s+bu\s+kim\??$', 1),       # "Dinara bu kim?"
+        (r'^bu\s+(.+?)\??$', 1),             # "bu Dinara?"
     ]
     for pat, grp in patterns:
-        m = re.match(pat, t)
+        m = re.match(pat, t_lower)
         if m:
-            name = m.group(1).strip().title()
-            # Filter out pure question words
-            if name.lower() in ("kim", "who", "кто", "qayerdan", "откуда", "nima", "что", "nechi", "сколько", "qanaqa", "как", "kani", "где", "qaerda", "qachon", "когда"):
+            name = m.group(1).strip()
+            if name.lower() in ("kim", "who", "кто", "qayerdan", "откуда", "nima", "что", "nechi", "сколько", "qanaqa", "как", "kani", "где", "qaerda", "qachon", "когда", "bu"):
                 return None
             return name
     return None
