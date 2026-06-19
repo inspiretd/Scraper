@@ -7,4 +7,6 @@ agent_memory/
 state_bundle.json
 *.pyc
 __pycache__/
-
+node_modules/
+site/
+*.log

@@ -25,6 +25,10 @@ PHONE = os.environ.get("PHONE")
 PUTER_TOKEN = os.environ.get("PUTER_TOKEN")
 PUTER_API = os.environ.get("PUTER_API", "https://api.puter.com")
 AI_MODEL = os.environ.get("AI_MODEL", "claude-opus-4-8")
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "9router")
+ROUTER_URL = os.environ.get("ROUTER_URL", "https://inspiretd-9router.fly.dev/v1")
+ROUTER_KEY = os.environ.get("ROUTER_KEY", "sk-9bee50f1884d4162-bt967d-7dab1f35")
+ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "mmf/mimo-auto")
 TRACK_USERNAME = os.environ.get("TRACK_USERNAME", "@wIw11111")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
 STATE_BUNDLE = os.environ.get("STATE_BUNDLE", "")
@@ -44,6 +48,10 @@ if API_ID is None: API_ID = cfg.get("api_id")
 if API_HASH is None: API_HASH = cfg.get("api_hash")
 if PHONE is None: PHONE = cfg.get("phone")
 if PUTER_TOKEN is None: PUTER_TOKEN = cfg.get("puter_token")
+AI_PROVIDER = cfg.get("ai_provider", AI_PROVIDER)
+ROUTER_URL = cfg.get("router_url", ROUTER_URL)
+ROUTER_KEY = cfg.get("router_key", ROUTER_KEY)
+ROUTER_MODEL = cfg.get("router_model", ROUTER_MODEL)
 
 # ─── JSON helpers ───
 def read_json(path, default):
@@ -233,16 +241,40 @@ def detect_emotion(text, emoji_data=None):
 
 # ─── AI ───
 def ask_puter(messages, model=AI_MODEL, timeout=120):
-    payload = {
-        "interface": "puter-chat-completion", "driver": "ai-chat",
-        "method": "complete", "args": {"messages": messages, "model": model}, "test_mode": False
-    }
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {PUTER_TOKEN}"}
-    r = requests.post(f"{PUTER_API}/drivers/call", json=payload, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    c = r.json()["result"]["message"]["content"]
-    if isinstance(c, list): return " ".join(x.get("text","") for x in c if isinstance(x,dict))
-    return c
+    if AI_PROVIDER == "9router":
+        payload = {"model": ROUTER_MODEL, "messages": messages, "max_tokens": 1024}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {ROUTER_KEY}"}
+        r = requests.post(f"{ROUTER_URL}/chat/completions", json=payload, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        text = r.text
+        full_content = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if line.startswith("data: ") and line != "data: [DONE]":
+                try:
+                    chunk = json.loads(line[6:])
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    if "content" in delta and delta["content"]:
+                        full_content.append(delta["content"])
+                except: pass
+        if full_content:
+            return "".join(full_content)
+        try:
+            data = json.loads(text.split("data: ")[1].split("\n\n")[0])
+            return data["choices"][0]["message"]["content"]
+        except: pass
+        return text[:200]
+    else:
+        payload = {
+            "interface": "puter-chat-completion", "driver": "ai-chat",
+            "method": "complete", "args": {"messages": messages, "model": model}, "test_mode": False
+        }
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {PUTER_TOKEN}"}
+        r = requests.post(f"{PUTER_API}/drivers/call", json=payload, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        c = r.json()["result"]["message"]["content"]
+        if isinstance(c, list): return " ".join(x.get("text","") for x in c if isinstance(x,dict))
+        return c
 
 def ask_agent(system_prompt, user_message):
     try: return ask_puter([{"role":"system","content":system_prompt},{"role":"user","content":user_message}])
