@@ -1,5 +1,7 @@
 config.json
 session.session
 agent_memory/
+state_bundle.json
 *.pyc
 __pycache__/
+

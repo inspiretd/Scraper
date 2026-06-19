@@ -4,6 +4,7 @@ import re
 import os
 import sys
 import time
+import base64
 import requests
 from datetime import datetime
 from collections import defaultdict
@@ -25,6 +26,9 @@ PUTER_API = os.environ.get("PUTER_API", "https://api.puter.com")
 AI_MODEL = os.environ.get("AI_MODEL", "claude-opus-4-8")
 TRACK_USERNAME = os.environ.get("TRACK_USERNAME", "@wIw11111")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
+STATE_BUNDLE = os.environ.get("STATE_BUNDLE", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = "inspiretd/Scraper"
 
 def load_config():
     try:
@@ -737,8 +741,109 @@ async def scan_all_contacts(client, me):
     print(f"Scanned {scanned} contacts")
     return dialogs
 
+# ─── STATE BACKUP ───
+def restore_state():
+    """Restore session + memory from STATE_BUNDLE env var (Render deployment)."""
+    if not STATE_BUNDLE:
+        # Fallback: restore from local files
+        return
+    try:
+        raw = base64.b64decode(STATE_BUNDLE).decode()
+        data = json.loads(raw)
+        # Restore session.session
+        if data.get("session"):
+            with open("session.session", "wb") as f:
+                f.write(base64.b64decode(data["session"]))
+            print("[State] session.session restored")
+        # Restore memory files
+        for fname, content in data.get("memory", {}).items():
+            path = os.path.join(MEMORY_DIR, fname)
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(content))
+        print(f"[State] {len(data.get('memory',{}))} memory files restored")
+    except Exception as e:
+        print(f"[State restore error]: {e}")
+
+def encode_state():
+    """Encode current session + memory to STATE_BUNDLE format."""
+    bundle = {"session": "", "memory": {}}
+    # Encode session.session
+    if os.path.exists("session.session"):
+        with open("session.session", "rb") as f:
+            bundle["session"] = base64.b64encode(f.read()).decode()
+    # Encode memory files
+    for fname in os.listdir(MEMORY_DIR):
+        path = os.path.join(MEMORY_DIR, fname)
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                bundle["memory"][fname] = base64.b64encode(f.read()).decode()
+    return base64.b64encode(json.dumps(bundle).encode()).decode()
+
+async def backup_to_github():
+    """Push current state to GitHub backup branch via API."""
+    if not GITHUB_TOKEN:
+        return
+    state = encode_state()
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state_bundle.json"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    # Try to get existing file's SHA first
+    sha = None
+    try:
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+    except: pass
+    # Create or update file on `backup` branch
+    payload = {
+        "message": f"Auto-backup {datetime.now().isoformat()}",
+        "content": base64.b64encode(state.encode()).decode(),
+        "branch": "backup",
+        "sha": sha
+    }
+    try:
+        if sha:
+            r = requests.put(url, json=payload, headers=headers)
+        else:
+            # First time — create branch from main
+            payload.pop("sha", None)
+            r = requests.put(url, json=payload, headers=headers)
+        if r.status_code in (200, 201):
+            print(f"[Backup] Saved to GitHub backup branch")
+        else:
+            print(f"[Backup] Failed: {r.status_code} {r.text[:100]}")
+    except Exception as e:
+        print(f"[Backup error]: {e}")
+
+async def restore_from_github():
+    """Download state from GitHub backup branch."""
+    if not GITHUB_TOKEN:
+        return
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state_bundle.json?ref=backup"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    try:
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            content = base64.b64decode(r.json()["content"]).decode()
+            raw = base64.b64decode(content).decode()
+            data = json.loads(raw)
+            if data.get("session"):
+                with open("session.session", "wb") as f:
+                    f.write(base64.b64decode(data["session"]))
+            for fname, c in data.get("memory", {}).items():
+                path = os.path.join(MEMORY_DIR, fname)
+                with open(path, "wb") as f:
+                    f.write(base64.b64decode(c))
+            print(f"[State] Restored from GitHub backup branch")
+    except Exception as e:
+        print(f"[State restore from GitHub error]: {e}")
+
 # ─── MAIN ───
 async def main():
+    # Restore state from env var or GitHub backup
+    restore_state()
+    if GITHUB_TOKEN and not STATE_BUNDLE:
+        await restore_from_github()
+
     if STRING_SESSION:
         client = TelegramClient(sessions.StringSession(STRING_SESSION), API_ID, API_HASH)
     else:
@@ -822,6 +927,15 @@ async def main():
                 return
             await handle_dm(event, client, me, text)
             return
+
+    # Periodic backup to GitHub (every 30 min)
+    async def backup_loop():
+        while True:
+            await asyncio.sleep(1800)
+            await backup_to_github()
+    if GITHUB_TOKEN:
+        asyncio.create_task(backup_loop())
+        print("[Backup] GitHub auto-backup enabled (30 min interval)")
 
     asyncio.create_task(offline_checker())
     print("\nBoth agents running. Bot is active.\n")
