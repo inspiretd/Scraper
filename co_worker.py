@@ -2,31 +2,43 @@ import json
 import asyncio
 import re
 import os
+import sys
 import time
 import requests
 from datetime import datetime
 from collections import defaultdict
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, sessions
 from telethon.tl.types import PeerUser, PeerChat, PeerChannel, MessageEntityMentionName, UserStatusOnline, UserStatusOffline
 from telethon.tl import functions
 from telethon.tl.functions.users import GetFullUserRequest
 
 CONFIG_FILE = "config.json"
-MEMORY_DIR = "agent_memory"
+MEMORY_DIR = os.environ.get("MEMORY_DIR", "agent_memory")
 os.makedirs(MEMORY_DIR, exist_ok=True)
 
-def load_config():
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+# Config from env vars (Render) or config.json (local)
+API_ID = int(os.environ["API_ID"]) if "API_ID" in os.environ else None
+API_HASH = os.environ.get("API_HASH")
+PHONE = os.environ.get("PHONE")
+PUTER_TOKEN = os.environ.get("PUTER_TOKEN")
+PUTER_API = os.environ.get("PUTER_API", "https://api.puter.com")
+AI_MODEL = os.environ.get("AI_MODEL", "claude-opus-4-8")
+TRACK_USERNAME = os.environ.get("TRACK_USERNAME", "@wIw11111")
+STRING_SESSION = os.environ.get("STRING_SESSION", "")
 
-config = load_config()
-API_ID = config["api_id"]
-API_HASH = config["api_hash"]
-PHONE = config["phone"]
-PUTER_TOKEN = config["puter_token"]
-PUTER_API = "https://api.puter.com"
-AI_MODEL = "claude-opus-4-8"
-TRACK_USERNAME = "@wIw11111"
+def load_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+# Fallback to config.json for local dev
+cfg = load_config()
+if API_ID is None: API_ID = cfg.get("api_id")
+if API_HASH is None: API_HASH = cfg.get("api_hash")
+if PHONE is None: PHONE = cfg.get("phone")
+if PUTER_TOKEN is None: PUTER_TOKEN = cfg.get("puter_token")
 
 # ─── JSON helpers ───
 def read_json(path, default):
@@ -727,7 +739,10 @@ async def scan_all_contacts(client, me):
 
 # ─── MAIN ───
 async def main():
-    client = TelegramClient("session", API_ID, API_HASH)
+    if STRING_SESSION:
+        client = TelegramClient(sessions.StringSession(STRING_SESSION), API_ID, API_HASH)
+    else:
+        client = TelegramClient("session", API_ID, API_HASH)
     await client.start(phone=PHONE)
     me = await client.get_me()
     print(f"\n=== CO-WORKER: auto_reply + agent_v3 ===")

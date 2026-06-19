@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: scraper-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn web:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: PHONE
+        sync: false
+      - key: PUTER_TOKEN
+        sync: false
+      - key: STRING_SESSION
+        sync: false
+      - key: MEMORY_DIR
+        value: /var/data/agent_memory
+      - key: PYTHON_VERSION
+        value: 3.12.0
