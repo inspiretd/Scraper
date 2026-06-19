@@ -559,6 +559,27 @@ async def handle_boss(text, event, client, me):
     except Exception as e:
         print(f"[Search error]: {e}")
 
+    # ─── INSTRUCTION HANDLER ───
+    try:
+        instr_check = await asyncio.to_thread(ask_puter, [
+            {"role":"system","content":"Is the user giving a COMMAND/INSTRUCTION about how you should behave? Examples: 'sen endi yomon gapirmaysan', 'bu odamga faqat yaxshi gapir', 'do not swear', 'be nice to X', 'ignore X', 'always reply in Uzbek'. If YES: return just the instruction text. If NO: return 'NONE'."},
+            {"role":"user","content":text}
+        ])
+        instr = instr_check.strip().strip('"\'')
+        if instr and instr != "NONE" and len(instr) > 3:
+            # Save to dynamic_instructions
+            with open(dyn_inst_path, "r", encoding="utf-8") as f:
+                existing = f.read().strip()
+            new_inst = f"[BOSS] {instr}"
+            all_insts = [l for l in existing.split("\n") if l.strip()]
+            all_insts.append(new_inst)
+            with open(dyn_inst_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(all_insts[-20:]))
+            await event.reply(f"✅ Tushundim: \"{instr}\"")
+            print(f"[Instruction saved]: {instr}")
+            return
+    except: pass
+
     boss_nik = me.first_name or "Boss"
     p = f"""You are the secretary. {boss_nik} is talking to you.
 
