@@ -144,6 +144,49 @@ def add_fact(user_id, fact):
         prof.setdefault("interests", []).append(fact)
         save_ltm()
 
+# ─── EMOJI ───
+def extract_emojis(text):
+    """Extract emoji characters and classify them."""
+    emoji_pattern = re.compile(
+        "[\U0001F300-\U0001F9FF]|[\U0001FA00-\U0001FA6F]|[\U0001FA70-\U0001FAFF]"
+        "|[\u2600-\u27BF]|[\uFE00-\uFE0F]|[\u2764-\u2765]|[\U0001F0A0-\U0001F0FF]"
+        "|[\U0001F1E0-\U0001F1FF]|[\u200D]|[\u2934-\u2935]|[\u2B05-\u2B07]"
+        "|[\u231A-\u231B]|[\u23E9-\u23F3]", re.UNICODE)
+    found = emoji_pattern.findall(text)
+    # Classify
+    hearts = {'❤', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💗', '💖', '💕', '💞', '💓', '😍', '🥰', '😘', '😻', '💝', '♥'}
+    angry_emojis = {'😡', '🤬', '😤', '👿', '💢', '😠', '💀', '🔪', '🗡'}
+    happy_emojis = {'😊', '😁', '😂', '🤣', '😅', '🥳', '🎉', '🙌', '👏', '💪', '🔥', '✨', '⭐', '🎊'}
+    return {
+        "all": found,
+        "hearts": [e for e in found if e in hearts],
+        "angry": [e for e in found if e in angry_emojis],
+        "happy": [e for e in found if e in happy_emojis],
+        "count": len(found)
+    }
+
+async def get_msg_context(event):
+    """Get text + emoji + sticker info from a message."""
+    msg = event.message
+    text = (msg.text or "").strip()
+    emoji_data = extract_emojis(text)
+    extra = ""
+    # Sticker handling
+    if msg.sticker:
+        st = msg.sticker
+        emoji_data["all"].append(st.emoji or "")
+        emoji_data["count"] += 1
+        extra = f"[Sticker: {st.emoji or ''}]"
+        if st.set_id:
+            extra += f" (pack: {st.set_id})"
+    if emoji_data["hearts"]:
+        extra += f" [❤️x{len(emoji_data['hearts'])}]"
+    if emoji_data["angry"]:
+        extra += f" [😡x{len(emoji_data['angry'])}]"
+    if emoji_data["happy"]:
+        extra += f" [😊x{len(emoji_data['happy'])}]"
+    return text, extra, emoji_data
+
 # ─── TEXT FILTER (from auto_reply) ───
 def is_meaningless(text):
     cleaned = re.sub(r'[\s\U0001F600-\U0010FFFF]', '', text)
@@ -165,12 +208,22 @@ def is_meaningless(text):
     return False
 
 # ─── EMOTION DETECTION ───
-def detect_emotion(text):
-    angry = {'idiot','fuck','bastard','tupoy','ebal','huinya','dolboyob','pidor','xuy','blya','nahuy','musor','tentak','ahmoq','sikim','qanjiq','jalyab','баран','лох','тупой','ебан','хуй','бля','нах','пидор'}
-    happy = {'haha','lol','хаха','круто','супер','rahmat','yaxshi',"zo'r",'рад'}
+def detect_emotion(text, emoji_data=None):
+    angry = {'idiot','fuck','bastard','tupoy','ebal','huinya','dolboyob','pidor','xuy','blya','nahuy','musor','tentak','ahmoq','sikim','qanjiq','jalyab','баран','лох','тупой','ебан','хуй','бля','нах','пидор','nax'}
+    happy = {'haha','lol','хаха','круто','супер','rahmat','yaxshi',"zo'r",'рад','ok','хорошо'}
+    love = {'jonim','janim','жоним','жаним','sevgilim','любим','милый','милая','дорог','sweet','baby','kotta','katta','york','ёрқ','yurak','heart'}
     lower = text.lower()
     a = sum(1 for w in angry if w in lower)
     h = sum(1 for w in happy if w in lower)
+    lv = sum(1 for w in love if w in lower)
+
+    if emoji_data:
+        a += len(emoji_data["angry"]) * 2
+        h += len(emoji_data["happy"]) * 2
+        lv += len(emoji_data["hearts"]) * 3
+
+    if lv > 0 and lv >= a:
+        return "love", min(0.95, 0.5 + lv * 0.1)
     if a > h: return "angry", min(0.99, 0.6 + a * 0.1)
     if h > 0: return "happy", min(0.95, 0.5 + h * 0.1)
     return "neutral", 0.5
@@ -369,6 +422,9 @@ async def handle_group_message(event, client, me, text, chat):
     sender_name = sender.first_name or "Unknown"
     chat_id = event.chat_id
 
+    # Extract emoji + sticker context
+    text, extra_ctx, emoji_data = await get_msg_context(event)
+
     # Auto-scan new groups
     gid_str = f"_group_{chat.id}"
     if gid_str not in contacts:
@@ -418,17 +474,22 @@ async def handle_dm(event, client, me, text):
     if uid_str not in contacts or not contacts[uid_str].get("from_scan"):
         asyncio.create_task(scan_single_contact(client, user_id))
 
-    if is_meaningless(text):
+    # Extract emoji + sticker context
+    text, extra_ctx, emoji_data = await get_msg_context(event)
+
+    if is_meaningless(text) and not extra_ctx:
         print(f"[{sender_name}]: filtered")
         return
-    print(f"[DM {sender_name}]: {text}")
+    print(f"[DM {sender_name}]: {text} {extra_ctx}")
 
-    add_stm(user_id, "user", text)
-    emotion, emotion_conf = detect_emotion(text)
+    display_text = text + " " + extra_ctx if extra_ctx else text
+    add_stm(user_id, "user", display_text)
+    emotion, emotion_conf = detect_emotion(text, emoji_data)
 
     prof = get_profile(user_id)
     if emotion == "angry": update_relationship(user_id, -3, "anger")
     elif emotion == "happy": update_relationship(user_id, 1, "positive")
+    elif emotion == "love": update_relationship(user_id, 3, "love")
 
     # Block command
     if any(kw in text.lower() for kw in ['block','blok','блок']):
@@ -551,7 +612,9 @@ async def search_person_in_chats(client, name_query):
     return results[:25]
 
 async def handle_boss(text, event, client, me):
-    add_stm(me.id, "boss", text)
+    # Extract emoji/sticker for context
+    text, extra_ctx, _ = await get_msg_context(event)
+    add_stm(me.id, "boss", text + " " + extra_ctx if extra_ctx else text)
     n = tracked_user_obj.first_name if tracked_user_obj else "?"
     ctx = get_stm_context(me.id, 10)
     stats = f"Online: {tracked_stats['online_count']} | Msgs: {tracked_stats['msg_count']} | Groups: {len(tracked_stats['groups_seen'])}"
@@ -878,6 +941,7 @@ async def restore_from_github():
         r = requests.get(url, headers=headers)
         if r.status_code == 200:
             raw = base64.b64decode(r.json()["content"]).decode()
+            data = json.loads(raw)
             if data.get("session"):
                 with open("session.session", "wb") as f:
                     f.write(base64.b64decode(data["session"]))
@@ -937,7 +1001,8 @@ async def main():
     async def handler(event):
         global boss_online, boss_last_active, boss_sleeping, away_message
         text = (event.text or "").strip()
-        if not text: return
+        has_sticker = event.message and event.message.sticker
+        if not text and not has_sticker: return
 
         # Track outgoing messages (boss is active)
         if event.out:
@@ -970,12 +1035,12 @@ async def main():
                     except: pass
                     print(f"[DM {sn} away-reply]: {away_message[:40]}")
                 else:
-                    print(f"[DM {sn} skipped — boss sleeping]: {text[:40]}")
+                    print(f"[DM {sn} skipped — boss sleeping]")
                 return
             if boss_online:
                 s = await event.get_sender()
                 sn = s.first_name if s else "?"
-                print(f"[DM {sn} skipped — boss online]: {text[:40]}")
+                print(f"[DM {sn} skipped — boss online]")
                 return
             await handle_dm(event, client, me, text)
             return
