@@ -1021,20 +1021,6 @@ async def main():
     print(f"Model: {AI_MODEL}")
     print(f"Memory: {MEMORY_DIR}/ ({len(ltm_cache)} users, {len(episodic)} events)")
 
-    await scan_all_contacts(client, me)
-    await learn_boss_style(client)
-    if await resolve_tracked_user(client, me):
-        await setup_tracking(client, me)
-
-    # Daily reflection at 23:00
-    async def reflection_loop():
-        while True:
-            await asyncio.sleep(3600)
-            if datetime.now().hour == 23:
-                await run_reflection(client, me)
-                await asyncio.sleep(7200)
-    asyncio.create_task(reflection_loop())
-
     # Init boss as online, will go offline after 3min idle
     global boss_last_active
     boss_last_active = now_ts()
@@ -1047,6 +1033,7 @@ async def main():
                 boss_online = False
                 print(f"[Status] {datetime.now():%H:%M} Boss offline — auto-reply enabled")
 
+    # Register event handler FIRST so messages work immediately
     @client.on(events.NewMessage)
     async def handler(event):
         global boss_online, boss_last_active, boss_sleeping, away_message
@@ -1095,6 +1082,18 @@ async def main():
             await handle_dm(event, client, me, text)
             return
 
+    asyncio.create_task(offline_checker())
+    print("[Bot] Event handler registered immediately")
+
+    # Daily reflection at 23:00
+    async def reflection_loop():
+        while True:
+            await asyncio.sleep(3600)
+            if datetime.now().hour == 23:
+                await run_reflection(client, me)
+                await asyncio.sleep(7200)
+    asyncio.create_task(reflection_loop())
+
     # Periodic backup to GitHub (every 30 min)
     async def backup_loop():
         while True:
@@ -1104,8 +1103,17 @@ async def main():
         asyncio.create_task(backup_loop())
         print("[Backup] GitHub auto-backup enabled (30 min interval)")
 
-    asyncio.create_task(offline_checker())
-    print("\nBoth agents running. Bot is active.\n")
+    # Background init — scan contacts, learn style, setup tracking
+    async def background_init():
+        print("[Bot] Scanning contacts in background...")
+        await scan_all_contacts(client, me)
+        await learn_boss_style(client)
+        if await resolve_tracked_user(client, me):
+            await setup_tracking(client, me)
+        print("[Bot] Background init complete — all systems ready")
+
+    asyncio.create_task(background_init())
+    print("\nBot is active. Messages are being handled.\n")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
