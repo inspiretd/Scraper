@@ -368,6 +368,11 @@ async def handle_group_message(event, client, me, text, chat):
     sender_name = sender.first_name or "Unknown"
     chat_id = event.chat_id
 
+    # Auto-scan new groups
+    gid_str = f"_group_{chat.id}"
+    if gid_str not in contacts:
+        asyncio.create_task(scan_new_group(client, chat))
+
     is_mentioned = False
     if event.mentioned or (event.message and event.message.entities):
         for e in event.message.entities or []:
@@ -406,6 +411,11 @@ async def handle_dm(event, client, me, text):
     sender = await event.get_sender()
     sender_name = sender.first_name or "Unknown"
     user_id = event.sender_id
+
+    # Auto-scan if new contact (not in contacts or not scanned)
+    uid_str = str(user_id)
+    if uid_str not in contacts or not contacts[uid_str].get("from_scan"):
+        asyncio.create_task(scan_single_contact(client, user_id))
 
     if is_meaningless(text):
         print(f"[{sender_name}]: filtered")
@@ -740,6 +750,57 @@ async def scan_all_contacts(client, me):
         except: pass
     print(f"Scanned {scanned} contacts")
     return dialogs
+
+async def scan_single_contact(client, uid):
+    """Scan a single contact — called when a new person messages."""
+    try:
+        s = await client.get_entity(uid)
+        await update_contact_info(client, uid, s)
+        msgs = []
+        async for m in client.iter_messages(uid, limit=15):
+            if m.text: msgs.append(m.text.strip())
+        if msgs:
+            txt = "\n".join(msgs[:10])
+            if len(txt) > 50:
+                summary = ask_puter([
+                    {"role":"system","content":"Extract who this person is. JSON: {\"who\":\"short description\",\"language\":\"uz/ru/en/kk/other\",\"topics\":[topic1,topic2],\"relation\":\"friend/family/colleague/other\"}"},
+                    {"role":"user","content":f"Chat with {s.first_name or '?'}:\n{txt[:2000]}"}
+                ])
+                data = json.loads(summary)
+                prof = get_profile(uid)
+                prof["language"] = data.get("language", "unknown")
+                for t in data.get("topics", []):
+                    if t not in prof.get("interests", []):
+                        prof.setdefault("interests", []).append(t)
+                contacts[str(uid)]["notes"] = data.get("who", "")
+                contacts[str(uid)]["from_scan"] = True
+                save_ltm(); save_contacts()
+        print(f"  [Auto-scan] {s.first_name or '?'}")
+        if GITHUB_TOKEN:
+            asyncio.create_task(backup_to_github())
+    except Exception as e:
+        print(f"  [Auto-scan error {uid}]: {e}")
+
+async def scan_new_group(client, chat):
+    """Scan a new group chat to learn its style and members."""
+    try:
+        members = []
+        async for m in client.iter_messages(chat.id, limit=30):
+            if m.text and m.sender_id and m.sender_id != (await client.get_me()).id:
+                s = await m.get_sender()
+                if s and s.first_name:
+                    nm = f"{s.first_name or ''} {s.last_name or ''}".strip()
+                    if nm and nm not in members:
+                        members.append(nm)
+        summary = "Group members: " + ", ".join(members[:15])
+        contacts[f"_group_{chat.id}"] = {
+            "name": chat.title or f"Group {chat.id}",
+            "notes": summary, "from_scan": True,
+            "known_from": datetime.now().isoformat()
+        }
+        save_contacts()
+        print(f"  [Auto-scan group] {chat.title}: {len(members)} members")
+    except: pass
 
 # ─── STATE BACKUP ───
 def restore_state():
