@@ -1,0 +1,5 @@
+config.json
+session.session
+agent_memory/
+*.pyc
+__pycache__/
