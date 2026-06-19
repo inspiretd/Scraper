@@ -196,6 +196,8 @@ tracked_user_obj = None
 tracked_user_id = None
 boss_online = True  # starts True, flips to False after 3min idle
 boss_last_active = 0  # timestamp of last outgoing message
+boss_sleeping = False  # boss told bot to sleep — no auto-replies
+away_message = ""  # custom away message to reply with when sleeping
 tracked_stats = {
     "online_count": 0, "offline_count": 0, "msg_count": 0,
     "groups_seen": set(), "last_online": None, "first_seen": datetime.now(),
@@ -559,6 +561,33 @@ async def handle_boss(text, event, client, me):
     except Exception as e:
         print(f"[Search error]: {e}")
 
+    # ─── SLEEP / AWAY HANDLER ───
+    global boss_sleeping, away_message
+    t_lower = text.lower()
+    # Wake up
+    if boss_sleeping and any(w in t_lower for w in ["uyg'on", "uygon", "wake", "turiq", "туриқ", "проснись"]):
+        boss_sleeping = False; away_message = ""
+        await event.reply("✅ Uyg'ondim. Auto-reply yoqildi.")
+        print("[Sleep] Woke up")
+        return
+    # Sleep command
+    if any(w in t_lower for w in ["uxla", "sleep", "hech kimga"]):
+        boss_sleeping = True
+        # Check if away message provided
+        parts = text.split("de.") if "de." in text else text.split("де.")
+        if len(parts) > 1:
+            away_message = parts[1].replace("de.", "").replace("де.", "").strip()
+            if len(away_message) < 3:
+                away_message = parts[0].strip()
+        else:
+            away_message = ""
+        if away_message:
+            await event.reply(f"✅ Tushundim. Hammaga: \"{away_message}\" deyman.")
+        else:
+            await event.reply("✅ Uxlap qoldim. Hech kimga javob bermayman.")
+        print(f"[Sleep] Away msg: {away_message or 'none'}")
+        return
+
     # ─── INSTRUCTION HANDLER ───
     try:
         instr_check = await asyncio.to_thread(ask_puter, [
@@ -567,7 +596,6 @@ async def handle_boss(text, event, client, me):
         ])
         instr = instr_check.strip().strip('"\'')
         if instr and instr != "NONE" and len(instr) > 3:
-            # Save to dynamic_instructions
             with open(dyn_inst_path, "r", encoding="utf-8") as f:
                 existing = f.read().strip()
             new_inst = f"[BOSS] {instr}"
@@ -618,20 +646,41 @@ async def extract_knowledge_async(user_id, text):
 
 # ─── SELF-REFLECTION ───
 async def run_reflection(client, me):
+    global boss_sleeping
     stats = {
         "users": len(ltm_cache), "positive": sum(p.get("positive_count",0) for p in ltm_cache.values()),
-        "negative": sum(p.get("negative_count",0) for p in ltm_cache.values())
+        "negative": sum(p.get("negative_count",0) for p in ltm_cache.values()),
+        "contacts": len(contacts), "episodic_events": len(episodic)
     }
-    p = f"Analyze today. Stats: {json.dumps(stats)}\n\nJSON: {{\"mistakes\":[],\"improvements\":[],\"new_instructions\":[]}}"
-    r = ask_agent("You are a self-improving AI.", p)
+    # Sample recent STM for learning
+    recent_convos = {}
+    for uid, data in list(stm.items())[:10]:
+        msgs = [m["text"][:100] for m in data["messages"][-6:]]
+        if msgs:
+            recent_convos[str(uid)] = msgs
+    context = json.dumps({"stats": stats, "recent": recent_convos}, ensure_ascii=False)
+    p = f"Review today's work. Stats + conversation samples:\n{context}\n\nJSON: {{\"mistakes\":[],\"improvements\":[],\"new_instructions\":[],\"behavior_tweaks\":[]}}"
+    r = ask_agent("You are a self-improving AI. Analyze what went wrong/right today and suggest concrete behavior changes.", p)
     try:
         d = json.loads(r)
         insts = d.get("new_instructions",[])
-        if insts:
+        tweaks = d.get("behavior_tweaks",[])
+        all_updates = insts + [f"[SELF] {t}" for t in tweaks]
+        if all_updates:
+            with open(dyn_inst_path,"r",encoding="utf-8") as f:
+                existing = f.read().strip()
+            old_lines = [l for l in existing.split("\n") if l.strip()]
+            combined = old_lines + all_updates
             with open(dyn_inst_path,"w",encoding="utf-8") as f:
-                f.write("\n".join(insts))
-        await client.send_message(me.id, f"Reflection done. {len(insts)} new instructions.")
-    except: pass
+                f.write("\n".join(combined[-30:]))
+        # Log improvement
+        log_path = os.path.join(MEMORY_DIR, "improvement_log.json")
+        log = read_json(log_path, [])
+        log.append({"date": datetime.now().isoformat(), "mistakes": d.get("mistakes",[]), "improvements": d.get("improvements",[])})
+        write_json(log_path, log[-50:])
+        await client.send_message(me.id, f"🧠 Self-reflect: {len(all_updates)} new instructions. {len(d.get('mistakes',[]))} mistakes reviewed.")
+    except Exception as e:
+        print(f"[Reflection error]: {e}")
 
 # ─── CHAT SCANNER ───
 async def scan_all_contacts(client, me):
@@ -714,7 +763,7 @@ async def main():
 
     @client.on(events.NewMessage)
     async def handler(event):
-        global boss_online, boss_last_active
+        global boss_online, boss_last_active, boss_sleeping, away_message
         text = (event.text or "").strip()
         if not text: return
 
@@ -730,14 +779,27 @@ async def main():
 
         if event.out: return
 
-        # Group messages (reply always if mentioned)
+        # Group messages (reply always if mentioned, unless sleeping)
         if isinstance(event.peer_id, (PeerChat, PeerChannel)):
+            if boss_sleeping:
+                print(f"[Group skipped — boss sleeping]: {text[:40]}")
+                return
             chat = await event.get_chat()
             await handle_group_message(event, client, me, text, chat)
             return
 
-        # DM messages — skip if boss is online
+        # DM messages — skip if boss is online or sleeping
         if isinstance(event.peer_id, PeerUser):
+            if boss_sleeping:
+                s = await event.get_sender()
+                sn = s.first_name if s else "?"
+                if away_message:
+                    try: await event.reply(away_message)
+                    except: pass
+                    print(f"[DM {sn} away-reply]: {away_message[:40]}")
+                else:
+                    print(f"[DM {sn} skipped — boss sleeping]: {text[:40]}")
+                return
             if boss_online:
                 s = await event.get_sender()
                 sn = s.first_name if s else "?"
