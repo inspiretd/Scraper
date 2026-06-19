@@ -10,6 +10,7 @@ from datetime import datetime
 from collections import defaultdict
 from telethon import TelegramClient, events, sessions
 from telethon.tl.types import PeerUser, PeerChat, PeerChannel, MessageEntityMentionName, UserStatusOnline, UserStatusOffline
+from telethon.tl.types import User as TLUser
 from telethon.tl import functions
 from telethon.tl.functions.users import GetFullUserRequest
 
@@ -716,8 +717,8 @@ async def scan_all_contacts(client, me):
     print(f"Total dialogs: {len(dialogs)}")
     scanned = 0
     for d in dialogs:
-        if not d.entity or not isinstance(d.entity, PeerUser): continue
-        uid = d.entity.user_id
+        if not d.entity or not isinstance(d.entity, TLUser): continue
+        uid = d.entity.id
         if uid == me.id: continue
         try:
             s = await client.get_entity(uid)
@@ -755,6 +756,7 @@ async def scan_single_contact(client, uid):
     """Scan a single contact — called when a new person messages."""
     try:
         s = await client.get_entity(uid)
+        if not isinstance(s, TLUser): return
         await update_contact_info(client, uid, s)
         msgs = []
         async for m in client.iter_messages(uid, limit=15):
@@ -826,52 +828,43 @@ def restore_state():
         print(f"[State restore error]: {e}")
 
 def encode_state():
-    """Encode current session + memory to STATE_BUNDLE format."""
+    """Encode current session + memory to JSON (base64 fields)."""
     bundle = {"session": "", "memory": {}}
-    # Encode session.session
     if os.path.exists("session.session"):
         with open("session.session", "rb") as f:
             bundle["session"] = base64.b64encode(f.read()).decode()
-    # Encode memory files
     for fname in os.listdir(MEMORY_DIR):
         path = os.path.join(MEMORY_DIR, fname)
         if os.path.isfile(path):
             with open(path, "rb") as f:
                 bundle["memory"][fname] = base64.b64encode(f.read()).decode()
-    return base64.b64encode(json.dumps(bundle).encode()).decode()
+    return json.dumps(bundle)
 
 async def backup_to_github():
     """Push current state to GitHub backup branch via API."""
     if not GITHUB_TOKEN:
         return
-    state = encode_state()
+    raw_json = encode_state()  # JSON string
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state_bundle.json"
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    # Try to get existing file's SHA first
     sha = None
     try:
-        r = requests.get(url, headers=headers)
+        r = requests.get(url + "?ref=backup", headers=headers)
         if r.status_code == 200:
             sha = r.json().get("sha")
     except: pass
-    # Create or update file on `backup` branch
     payload = {
         "message": f"Auto-backup {datetime.now().isoformat()}",
-        "content": base64.b64encode(state.encode()).decode(),
+        "content": base64.b64encode(raw_json.encode()).decode(),
         "branch": "backup",
-        "sha": sha
     }
+    if sha: payload["sha"] = sha
     try:
-        if sha:
-            r = requests.put(url, json=payload, headers=headers)
-        else:
-            # First time — create branch from main
-            payload.pop("sha", None)
-            r = requests.put(url, json=payload, headers=headers)
+        r = requests.put(url, json=payload, headers=headers)
         if r.status_code in (200, 201):
-            print(f"[Backup] Saved to GitHub backup branch")
+            print(f"[Backup] GitHub backup branch updated")
         else:
-            print(f"[Backup] Failed: {r.status_code} {r.text[:100]}")
+            print(f"[Backup] Failed: {r.status_code}")
     except Exception as e:
         print(f"[Backup error]: {e}")
 
@@ -884,9 +877,7 @@ async def restore_from_github():
     try:
         r = requests.get(url, headers=headers)
         if r.status_code == 200:
-            content = base64.b64decode(r.json()["content"]).decode()
-            raw = base64.b64decode(content).decode()
-            data = json.loads(raw)
+            raw = base64.b64decode(r.json()["content"]).decode()
             if data.get("session"):
                 with open("session.session", "wb") as f:
                     f.write(base64.b64decode(data["session"]))
